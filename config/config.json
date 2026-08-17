@@ -1,0 +1,86 @@
+{
+    "waf": {
+        "listen_address": "127.0.0.1:8080",
+        "target_url": "http://127.0.0.1:9000",
+        "max_body_bytes": 1048576,
+        "max_headers": 100,
+        "max_header_value_bytes": 8192,
+        "max_header_bytes": 1048576,
+        "read_timeout_seconds": 10,
+        "write_timeout_seconds": 30,
+        "idle_timeout_seconds": 60,
+        "rate_limit_requests": 120,
+        "rate_limit_window_seconds": 60,
+        "rate_limit_burst": 30,
+        "rate_limit_block_seconds": 120,
+        "trust_proxy_headers": false,
+        "preserve_host": false,
+        "csrf_protection_enabled": false,
+        "csrf_token_header": "X-CSRF-Token",
+        "csrf_cookie_name": "sentinelwaf_csrf",
+        "csrf_exempt_paths": [
+            "/api/*",
+            "/healthz"
+        ],
+        "blocking_anomaly_threshold": 4,
+        "blocking_paranoia_level": 2
+    },
+    "runtime": {
+        "state_file": "runtime/state.json",
+        "pid_dir": "runtime",
+        "log_file": "logs/sentinelwaf.log"
+    },
+    "allowlist": {
+        "ips": [],
+        "paths": [
+            "/healthz"
+        ]
+    },
+    "blocklist": {
+        "ips": [],
+        "paths": [],
+        "user_agents": [
+            "sqlmap",
+            "nikto",
+            "acunetix",
+            "nmap",
+            "masscan",
+            "zgrab",
+            "wpscan",
+            "dirbuster",
+            "gobuster",
+            "ffuf",
+            "hydra",
+            "nessus",
+            "openvas"
+        ]
+    },
+    "security_headers": {
+        "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+        "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+        "Referrer-Policy": "no-referrer",
+        "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY"
+    },
+    "custom_rules": [
+        {
+            "id": "custom-admin-probe",
+            "name": "sensitive admin probe",
+            "category": "OWASP A01 Broken Access Control",
+            "severity": "medium",
+            "action": "block",
+            "targets": [
+                "path"
+            ],
+            "patterns": [
+                "(?i)/(?:adminer|phpmyadmin|\\.git|\\.env)(?:/|$)"
+            ],
+            "paranoia": 1,
+            "tags": [
+                "custom"
+            ]
+        }
+    ],
+    "disabled_rules": []
+}

@@ -29,6 +29,7 @@ type Detection struct {
 	Name         string   `json:"name"`
 	Category     string   `json:"category"`
 	Severity     string   `json:"severity"`
+	Action       string   `json:"action"`
 	Reason       string   `json:"reason"`
 	Target       string   `json:"target"`
 	Evidence     string   `json:"evidence"`
@@ -112,9 +113,10 @@ func New(custom []config.RuleConfig, disabled []string, threshold, paranoia int)
 
 func (e *Engine) Inspect(inputs map[string]string) *Detection {
 	var matches []Detection
+	var logMatches []Detection
 	score := 0
 	for _, rule := range e.rules {
-		if rule.rule.Paranoia > e.paranoia || strings.ToLower(rule.rule.Action) != "block" {
+		if rule.rule.Paranoia > e.paranoia {
 			continue
 		}
 		matched := false
@@ -150,33 +152,52 @@ func (e *Engine) Inspect(inputs map[string]string) *Detection {
 		if !matched {
 			continue
 		}
-		score += severityScore(rule.rule.Severity)
-		matches = append(matches, Detection{
+		detection := Detection{
 			RuleID:   rule.rule.ID,
 			Name:     rule.rule.Name,
 			Category: rule.rule.Category,
 			Severity: rule.rule.Severity,
+			Action:   strings.ToLower(rule.rule.Action),
 			Reason:   rule.rule.Name,
 			Target:   targetName,
 			Evidence: evidence,
+		}
+		if detection.Action == "log" {
+			logMatches = append(logMatches, detection)
+			continue
+		}
+		score += severityScore(rule.rule.Severity)
+		matches = append(matches, detection)
+	}
+	if score >= e.threshold && len(matches) > 0 {
+		sort.SliceStable(matches, func(i, j int) bool {
+			left := severityScore(matches[i].Severity)
+			right := severityScore(matches[j].Severity)
+			return left > right
 		})
+		primary := matches[0]
+		primary.AnomalyScore = score
+		primary.Reason = fmt.Sprintf("%s (anomaly score %d)", primary.Name, score)
+		primary.MatchedRules = make([]string, 0, len(matches))
+		for _, match := range matches {
+			primary.MatchedRules = append(primary.MatchedRules, match.RuleID)
+		}
+		return &primary
 	}
-	if score < e.threshold || len(matches) == 0 {
-		return nil
+	if len(logMatches) > 0 {
+		sort.SliceStable(logMatches, func(i, j int) bool {
+			left := severityScore(logMatches[i].Severity)
+			right := severityScore(logMatches[j].Severity)
+			return left > right
+		})
+		primary := logMatches[0]
+		primary.MatchedRules = make([]string, 0, len(logMatches))
+		for _, match := range logMatches {
+			primary.MatchedRules = append(primary.MatchedRules, match.RuleID)
+		}
+		return &primary
 	}
-	sort.SliceStable(matches, func(i, j int) bool {
-		left := severityScore(matches[i].Severity)
-		right := severityScore(matches[j].Severity)
-		return left > right
-	})
-	primary := matches[0]
-	primary.AnomalyScore = score
-	primary.Reason = fmt.Sprintf("%s (anomaly score %d)", primary.Name, score)
-	primary.MatchedRules = make([]string, 0, len(matches))
-	for _, match := range matches {
-		primary.MatchedRules = append(primary.MatchedRules, match.RuleID)
-	}
-	return &primary
+	return nil
 }
 
 func severityScore(severity string) int {
@@ -191,35 +212,6 @@ func severityScore(severity string) int {
 		return 2
 	default:
 		return 1
-	}
-}
-
-func DefaultRules() []Rule {
-	return []Rule{
-		{ID: "920-001", Name: "HTTP protocol CRLF injection", Category: "OWASP CRS 920 HTTP Protocol Attack", Severity: "high", Paranoia: 1, Tags: []string{"protocol", "crlf"}, Targets: []string{"path", "query", "headers", "body"}, Patterns: []string{`(?i)(?:%0d%0a|%0a|%0d|\r\n|\n\r)`}},
-		{ID: "920-002", Name: "HTTP request smuggling marker", Category: "OWASP CRS 920 HTTP Protocol Attack", Severity: "critical", Paranoia: 2, Tags: []string{"protocol", "smuggling"}, Targets: []string{"headers"}, Patterns: []string{`(?i)(?:transfer-encoding\s*:[^\n]*,|content-length\s*:[^\n]+\n[^\n]*content-length\s*:)`}},
-		{ID: "921-001", Name: "HTTP method or URI abuse", Category: "OWASP CRS 921 Protocol Attack", Severity: "medium", Paranoia: 2, Tags: []string{"protocol"}, Targets: []string{"method", "url"}, Patterns: []string{`(?i)(?:\bTRACE\b|\bTRACK\b|\bCONNECT\b\s+[^\s]+\s+HTTP)`, `(?i)%00|%ff%ff%ff|%c0%af`}},
-		{ID: "930-001", Name: "local file inclusion attempt", Category: "OWASP CRS 930 LFI", Severity: "high", Paranoia: 1, Tags: []string{"attack-lfi"}, Targets: []string{"path", "query", "body"}, Patterns: []string{`(?i)(?:/etc/(?:passwd|shadow|hosts)|/proc/(?:self|version)|/var/log/[^\s]+|boot\.ini|win\.ini|system32)`, `(?i)(?:file|php|zip|data|expect|input)://`}},
-		{ID: "931-001", Name: "remote file inclusion attempt", Category: "OWASP CRS 931 RFI", Severity: "high", Paranoia: 1, Tags: []string{"attack-rfi"}, Targets: []string{"path", "query", "body"}, Patterns: []string{`(?i)(?:https?|ftp)://[^\s]+(?:\.(?:php|asp|aspx|jsp|cgi)|(?:[/?#]|$))`, `(?i)\b(?:include|require)(?:_once)?\b\s*[=(]\s*https?://`}},
-		{ID: "932-001", Name: "Unix or Windows command injection", Category: "OWASP CRS 932 RCE", Severity: "critical", Paranoia: 1, Tags: []string{"attack-rce", "platform-unix", "platform-windows"}, Targets: []string{"path", "query", "body", "headers"}, Patterns: []string{`(?i)(?:;|\|\||&&|\|)\s*(?:cat|id|whoami|uname|wget|curl|bash|sh|python|python3|perl|nc|netcat|powershell|cmd|certutil)\b`, `(?i)(?:/bin/(?:sh|bash)|cmd\.exe|powershell(?:\.exe)?)`, `(?:\$\(|%60)`}},
-		{ID: "932-002", Name: "server-side template or expression injection", Category: "OWASP CRS 932 RCE", Severity: "high", Paranoia: 2, Tags: []string{"attack-rce", "ssti"}, Targets: []string{"path", "query", "body"}, Patterns: []string{`(?:\{\{\s*[^}]+\s*\}\}|\$\{[^}]+\}|<%=?[^%]*%>)`, `(?i)(?:Runtime\.getRuntime\(\)|ProcessBuilder\s*\(|eval\s*\(|exec\s*\()`}},
-		{ID: "933-001", Name: "PHP code injection marker", Category: "OWASP CRS 933 PHP", Severity: "critical", Paranoia: 2, Tags: []string{"attack-php"}, Targets: []string{"path", "query", "body"}, Patterns: []string{`(?i)<\?(?:php|=)?`, `(?i)(?:phpinfo|assert|passthru|shell_exec|system|proc_open|popen)\s*\(`, `(?i)preg_replace\s*\(.*?/e["']`}},
-		{ID: "934-001", Name: "Node.js deserialization or prototype pollution", Category: "OWASP CRS 934 Generic", Severity: "high", Paranoia: 2, Tags: []string{"attack-node", "deserialization"}, Targets: []string{"path", "query", "body"}, Patterns: []string{`(?i)(?:__proto__|constructor\s*\[?\s*["']prototype["']|prototype\s*:)`, `(?i)(?:node-serialize|funcster|ObjectInputStream|serialize-javascript)`}},
-		{ID: "934-002", Name: "Java deserialization or reflection exploit", Category: "OWASP CRS 934 Generic", Severity: "critical", Paranoia: 2, Tags: []string{"attack-java", "deserialization"}, Targets: []string{"path", "query", "body"}, Patterns: []string{`(?i)(?:java\.lang\.Runtime|java\.lang\.ProcessBuilder|InvokerTransformer|commons-collections|ysoserial)`, `(?i)rO0AB[A-Za-z0-9+/=]{8,}`}},
-		{ID: "934-003", Name: "generic code execution marker", Category: "OWASP CRS 934 Generic", Severity: "high", Paranoia: 2, Tags: []string{"attack-rce"}, Targets: []string{"path", "query", "body"}, Patterns: []string{`(?i)(?:String\.fromCharCode|Function\s*\(|constructor\s*\(|Reflect\.apply|Class\.forName)`}},
-		{ID: "941-001", Name: "cross-site scripting HTML/script injection", Category: "OWASP CRS 941 XSS", Severity: "high", Paranoia: 1, Tags: []string{"attack-xss"}, Targets: []string{"path", "query", "body", "headers"}, Patterns: []string{`(?i)<\s*script\b`, `(?i)<\s*(?:iframe|object|embed|svg|img|body|meta|link)\b[^>]*(?:on\w+\s*=|javascript:)`, `(?i)javascript\s*:`}},
-		{ID: "941-002", Name: "cross-site scripting event handler or DOM sink", Category: "OWASP CRS 941 XSS", Severity: "high", Paranoia: 2, Tags: []string{"attack-xss"}, Targets: []string{"path", "query", "body"}, Patterns: []string{`(?i)on(?:error|load|click|mouseover|focus|submit)\s*=`, `(?i)(?:document\.cookie|window\.location|localStorage|sessionStorage)`, `(?i)(?:eval|setTimeout|setInterval)\s*\(`}},
-		{ID: "942-001", Name: "SQL injection union/select attack", Category: "OWASP CRS 942 SQLi", Severity: "high", Paranoia: 1, Tags: []string{"attack-sqli"}, Targets: []string{"path", "query", "body", "headers"}, Patterns: []string{`(?i)\bunion\b\s+(?:all\s+)?\bselect\b`, `(?i)\bselect\b.+\bfrom\b`, `(?i)\binsert\b\s+into|\bupdate\b.+\bset\b|\bdelete\b\s+from`}},
-		{ID: "942-002", Name: "SQL injection boolean or comment attack", Category: "OWASP CRS 942 SQLi", Severity: "high", Paranoia: 1, Tags: []string{"attack-sqli"}, Targets: []string{"path", "query", "body"}, Patterns: []string{`(?i)(?:\bor\b|\band\b)\s+['"]?\d+['"]?\s*=\s*['"]?\d+`, `(?i)(?:--|#|/\*)\s*(?:$|[\w-])`}},
-		{ID: "942-003", Name: "SQL injection time-based or file access function", Category: "OWASP CRS 942 SQLi", Severity: "critical", Paranoia: 2, Tags: []string{"attack-sqli"}, Targets: []string{"path", "query", "body"}, Patterns: []string{`(?i)(?:sleep\s*\(|benchmark\s*\(|pg_sleep\s*\(|waitfor\s+delay)`, `(?i)(?:load_file\s*\(|into\s+outfile|xp_cmdshell|@@version|information_schema)`}},
-		{ID: "943-001", Name: "session fixation marker", Category: "OWASP CRS 943 Session Fixation", Severity: "medium", Paranoia: 2, Tags: []string{"attack-session-fixation"}, Targets: []string{"path", "query", "body"}, Patterns: []string{`(?i);(?:jsessionid|phpsessid|sessionid)=`, `(?i)(?:jsessionid|phpsessid|sessionid)=.{1,128}`}},
-		{ID: "944-001", Name: "XML external entity injection", Category: "OWASP CRS 944 Generic", Severity: "high", Paranoia: 2, Tags: []string{"attack-xxe"}, Targets: []string{"body"}, Patterns: []string{`(?i)<!doctype[^>]*(?:\[|>)`, `(?i)<!entity\s+[^>]+(?:system|public)`, `(?i)(?:system|public)\s+["']file://`}},
-		{ID: "944-002", Name: "LDAP or XPath injection", Category: "OWASP CRS 944 Generic", Severity: "high", Paranoia: 2, Tags: []string{"attack-ldap", "attack-xpath"}, Targets: []string{"query", "body"}, Patterns: []string{`(?i)\b(?:ldap|ldaps)://`, `(?i)(?:\*\)|\(\|\(|\&\(|\bxpath\b).*(?:=|\*)`}},
-		{ID: "944-003", Name: "NoSQL injection operator", Category: "OWASP CRS 944 Generic", Severity: "high", Paranoia: 2, Tags: []string{"attack-nosqli"}, Targets: []string{"query", "body"}, Patterns: []string{`(?i)(?:\"?\$(?:where|regex|ne|gt|gte|lt|lte|in|nin|exists)\"?\s*:)`, `(?i)(?:\$where\s*:\s*(?:function|\{))`}},
-		{ID: "944-004", Name: "Server-side request forgery URL scheme", Category: "OWASP CRS 944 Generic", Severity: "high", Paranoia: 2, Tags: []string{"attack-ssrf"}, Targets: []string{"path", "query", "body"}, Patterns: []string{`(?i)(?:https?|gopher|dict|ftp)://(?:127\.0\.0\.1|localhost|0\.0\.0\.0|169\.254\.169\.254|::1)(?::|/|$)`, `(?i)http://(?:2130706433|0x7f000001|0177\.0\.0\.1)`}},
-		{ID: "944-005", Name: "file upload executable content marker", Category: "OWASP CRS 944 Generic", Severity: "high", Paranoia: 3, Tags: []string{"attack-upload"}, Targets: []string{"body", "headers"}, Patterns: []string{`(?i)content-disposition:[^\n]*filename=[^\n]+\.(?:php[0-9]?|phtml|phar|jsp|jspx|asp|aspx|cgi|exe|dll)(?:\W|$)`, `(?i)(?:MZ.{1,16}This program cannot be run|<\?php)`}},
-		{ID: "949-001", Name: "scanner and automated attack client", Category: "OWASP CRS 949 Blocking Evaluation", Severity: "high", Paranoia: 1, Tags: []string{"attack-scanner"}, Targets: []string{"user_agent"}, Patterns: []string{`(?i)(?:sqlmap|nikto|acunetix|nmap|masscan|zgrab|wpscan|dirbuster|gobuster|ffuf|hydra|nessus|openvas|burpsuite|havij)`}},
-		{ID: "920-003", Name: "malformed payload or NUL byte", Category: "OWASP CRS 920 HTTP Protocol Attack", Severity: "medium", Paranoia: 1, Tags: []string{"protocol"}, Targets: []string{"path", "query", "body", "headers"}, Patterns: []string{`(?:%00|\x00)`}},
 	}
 }
 
@@ -238,165 +230,29 @@ func targetValues(inputs map[string]string, target string) []string {
 	return nil
 }
 
-func normalizations(value string) []string {
-	seen := map[string]struct{}{}
-	values := make([]string, 0, 8)
-	add := func(candidate string) {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "" {
-			return
-		}
-		if _, ok := seen[candidate]; ok {
-			return
-		}
-		seen[candidate] = struct{}{}
-		values = append(values, candidate)
-	}
-
+func normalize(value string) string {
 	current := value
-	add(current)
-	for i := 0; i < 8; i++ {
-		next := current
-		if decoded, err := url.QueryUnescape(next); err == nil {
-			next = decoded
-		}
-		if decoded, err := url.PathUnescape(next); err == nil {
-			next = decoded
-		}
-		next = html.UnescapeString(next)
-		next = decodeEscapes(next)
-		if next == current {
+	for i := 0; i < 4; i++ {
+		decoded, err := url.QueryUnescape(current)
+		if err != nil || decoded == current {
 			break
 		}
-		current = next
-		add(current)
+		current = decoded
 	}
-	add(stripInvisible(current))
+	current = html.UnescapeString(current)
+	return strings.TrimSpace(current)
+}
+
+func normalizations(value string) []string {
+	values := []string{value}
+	decoded := normalize(value)
+	if decoded != value {
+		values = append(values, decoded)
+	}
+	if unicode.IsSpace([]rune(decoded)[0]) {
+		values = append(values, strings.Join(strings.Fields(decoded), " "))
+	}
 	return values
-}
-
-func decodeEscapes(value string) string {
-	var b strings.Builder
-	b.Grow(len(value))
-	for i := 0; i < len(value); i++ {
-		if value[i] != '\\' || i+1 >= len(value) {
-			b.WriteByte(value[i])
-			continue
-		}
-		switch value[i+1] {
-		case 'x':
-			if i+3 < len(value) {
-				if n, ok := hexByte(value[i+2], value[i+3]); ok {
-					b.WriteByte(n)
-					i += 3
-					continue
-				}
-			}
-		case 'u':
-			if i+5 < len(value) {
-				if r, ok := hexRune(value[i+2 : i+6]); ok {
-					b.WriteRune(r)
-					i += 5
-					continue
-				}
-			}
-		}
-		b.WriteByte(value[i])
-	}
-	return b.String()
-}
-
-func hexByte(a, b byte) (byte, bool) {
-	hi, ok := hexValue(a)
-	if !ok {
-		return 0, false
-	}
-	lo, ok := hexValue(b)
-	if !ok {
-		return 0, false
-	}
-	return hi<<4 | lo, true
-}
-
-func hexRune(value string) (rune, bool) {
-	if len(value) != 4 {
-		return 0, false
-	}
-	var r rune
-	for i := 0; i < len(value); i++ {
-		n, ok := hexValue(value[i])
-		if !ok {
-			return 0, false
-		}
-		r = r<<4 | rune(n)
-	}
-	return r, true
-}
-
-func hexValue(value byte) (byte, bool) {
-	switch {
-	case value >= '0' && value <= '9':
-		return value - '0', true
-	case value >= 'a' && value <= 'f':
-		return value - 'a' + 10, true
-	case value >= 'A' && value <= 'F':
-		return value - 'A' + 10, true
-	default:
-		return 0, false
-	}
-}
-
-func stripInvisible(value string) string {
-	return strings.Map(func(r rune) rune {
-		if r >= 0xff01 && r <= 0xff5e {
-			return r - 0xfee0
-		}
-		if r == 0x3000 {
-			return ' '
-		}
-		switch {
-		case r == '\u0000',
-			r == '\u00ad',
-			r == '\u034f',
-			r == '\u061c',
-			r == '\u115f',
-			r == '\u1160',
-			r == '\u17b4',
-			r == '\u17b5',
-			r == '\u180e',
-			r == '\u200b',
-			r == '\u200c',
-			r == '\u200d',
-			r == '\u200e',
-			r == '\u200f',
-			r == '\u202a',
-			r == '\u202b',
-			r == '\u202c',
-			r == '\u202d',
-			r == '\u202e',
-			r == '\u2060',
-			r == '\u2061',
-			r == '\u2062',
-			r == '\u2063',
-			r == '\u2064',
-			r == '\u2066',
-			r == '\u2067',
-			r == '\u2068',
-			r == '\u2069',
-			r == '\u206a',
-			r == '\u206b',
-			r == '\u206c',
-			r == '\u206d',
-			r == '\u206e',
-			r == '\u206f',
-			r == '\ufeff':
-			return -1
-		case unicode.IsControl(r):
-			return ' '
-		default:
-			return r
-		}
-	}, value)
 }
 
 func sample(value string, loc []int) string {

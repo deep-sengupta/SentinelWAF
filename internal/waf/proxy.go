@@ -51,12 +51,23 @@ func NewServer(cfg *config.Config, auditor *logging.Auditor, stateStore *state.S
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
+		forwardedHost := req.Host
+		req.Header.Del("X-Forwarded-For")
+		req.Header.Del("X-Forwarded-Host")
+		req.Header.Del("X-Forwarded-Proto")
+		req.Header.Del("X-Real-IP")
 		originalDirector(req)
 		if !cfg.WAF.PreserveHost {
 			req.Host = target.Host
 		}
 		req.Header.Set("X-SentinelWAF", "active")
 		req.Header.Set("X-Forwarded-Proto", forwardedProto(req))
+		req.Header.Set("X-Forwarded-Host", forwardedHost)
+		if host, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+			req.Header.Set("X-Real-IP", host)
+		} else if net.ParseIP(req.RemoteAddr) != nil {
+			req.Header.Set("X-Real-IP", req.RemoteAddr)
+		}
 	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		security.Apply(resp.Header, cfg.SecurityHeaders)

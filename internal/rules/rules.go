@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"encoding/json"
 	"fmt"
 	"html"
 	"net/url"
@@ -232,26 +233,92 @@ func targetValues(inputs map[string]string, target string) []string {
 
 func normalize(value string) string {
 	current := value
-	for i := 0; i < 4; i++ {
-		decoded, err := url.QueryUnescape(current)
-		if err != nil || decoded == current {
+	for i := 0; i < 8; i++ {
+		changed := false
+		if decoded, err := url.QueryUnescape(current); err == nil && decoded != current {
+			current = decoded
+			changed = true
+		}
+		delimited := html.UnescapeString(current)
+		if delimited != current {
+			current = delimited
+			changed = true
+		}
+		if !changed {
 			break
 		}
-		current = decoded
 	}
-	current = html.UnescapeString(current)
-	return strings.TrimSpace(current)
+	return canonicalize(current)
 }
 
 func normalizations(value string) []string {
-	values := []string{value}
+	seen := make(map[string]struct{})
+	values := make([]string, 0, 8)
+	add := func(candidate string) {
+		if candidate == "" {
+			return
+		}
+		if _, ok := seen[candidate]; ok {
+			return
+		}
+		seen[candidate] = struct{}{}
+		values = append(values, candidate)
+	}
+	add(value)
 	decoded := normalize(value)
-	if decoded != value {
-		values = append(values, decoded)
+	add(decoded)
+	add(canonicalize(value))
+	add(canonicalize(decoded))
+	for _, candidate := range append([]string{}, values...) {
+		for _, extracted := range jsonStrings(candidate) {
+			add(extracted)
+			add(normalize(extracted))
+			add(canonicalize(extracted))
+		}
 	}
-	if unicode.IsSpace([]rune(decoded)[0]) {
-		values = append(values, strings.Join(strings.Fields(decoded), " "))
+	return values
+}
+
+func canonicalize(value string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) && r != '\t' && r != '\n' && r != '\r' {
+			return -1
+		}
+		if unicode.IsSpace(r) {
+			return ' '
+		}
+		switch r {
+		case '\u200b', '\u200c', '\u200d', '\ufeff', '\u2060':
+			return -1
+		default:
+			return r
+		}
+	}, value)
+}
+
+func jsonStrings(value string) []string {
+	var decoded any
+	if err := json.Unmarshal([]byte(value), &decoded); err != nil {
+		return nil
 	}
+	var values []string
+	var collect func(any)
+	collect = func(item any) {
+		switch typed := item.(type) {
+		case string:
+			values = append(values, typed)
+		case []any:
+			for _, child := range typed {
+				collect(child)
+			}
+		case map[string]any:
+			for key, child := range typed {
+				values = append(values, key)
+				collect(child)
+			}
+		}
+	}
+	collect(decoded)
 	return values
 }
 

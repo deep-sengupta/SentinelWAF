@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	"sentinelwaf/internal/config"
 )
@@ -125,12 +126,16 @@ func (e *Engine) Inspect(inputs map[string]string) *Detection {
 				if value == "" {
 					continue
 				}
-				scan := normalize(value)
-				for _, pattern := range rule.patterns {
-					if loc := pattern.re.FindStringIndex(scan); loc != nil {
-						matched = true
-						targetName = target
-						evidence = sample(scan, loc)
+				for _, scan := range normalizations(value) {
+					for _, pattern := range rule.patterns {
+						if loc := pattern.re.FindStringIndex(scan); loc != nil {
+							matched = true
+							targetName = target
+							evidence = sample(scan, loc)
+							break
+						}
+					}
+					if matched {
 						break
 					}
 				}
@@ -233,17 +238,165 @@ func targetValues(inputs map[string]string, target string) []string {
 	return nil
 }
 
-func normalize(value string) string {
+func normalizations(value string) []string {
+	seen := map[string]struct{}{}
+	values := make([]string, 0, 8)
+	add := func(candidate string) {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			return
+		}
+		if _, ok := seen[candidate]; ok {
+			return
+		}
+		seen[candidate] = struct{}{}
+		values = append(values, candidate)
+	}
+
 	current := value
-	for i := 0; i < 4; i++ {
-		decoded, err := url.QueryUnescape(current)
-		if err != nil || decoded == current {
+	add(current)
+	for i := 0; i < 8; i++ {
+		next := current
+		if decoded, err := url.QueryUnescape(next); err == nil {
+			next = decoded
+		}
+		if decoded, err := url.PathUnescape(next); err == nil {
+			next = decoded
+		}
+		next = html.UnescapeString(next)
+		next = decodeEscapes(next)
+		if next == current {
 			break
 		}
-		current = decoded
+		current = next
+		add(current)
 	}
-	current = html.UnescapeString(current)
-	return strings.TrimSpace(current)
+	add(stripInvisible(current))
+	return values
+}
+
+func decodeEscapes(value string) string {
+	var b strings.Builder
+	b.Grow(len(value))
+	for i := 0; i < len(value); i++ {
+		if value[i] != '\\' || i+1 >= len(value) {
+			b.WriteByte(value[i])
+			continue
+		}
+		switch value[i+1] {
+		case 'x':
+			if i+3 < len(value) {
+				if n, ok := hexByte(value[i+2], value[i+3]); ok {
+					b.WriteByte(n)
+					i += 3
+					continue
+				}
+			}
+		case 'u':
+			if i+5 < len(value) {
+				if r, ok := hexRune(value[i+2 : i+6]); ok {
+					b.WriteRune(r)
+					i += 5
+					continue
+				}
+			}
+		}
+		b.WriteByte(value[i])
+	}
+	return b.String()
+}
+
+func hexByte(a, b byte) (byte, bool) {
+	hi, ok := hexValue(a)
+	if !ok {
+		return 0, false
+	}
+	lo, ok := hexValue(b)
+	if !ok {
+		return 0, false
+	}
+	return hi<<4 | lo, true
+}
+
+func hexRune(value string) (rune, bool) {
+	if len(value) != 4 {
+		return 0, false
+	}
+	var r rune
+	for i := 0; i < len(value); i++ {
+		n, ok := hexValue(value[i])
+		if !ok {
+			return 0, false
+		}
+		r = r<<4 | rune(n)
+	}
+	return r, true
+}
+
+func hexValue(value byte) (byte, bool) {
+	switch {
+	case value >= '0' && value <= '9':
+		return value - '0', true
+	case value >= 'a' && value <= 'f':
+		return value - 'a' + 10, true
+	case value >= 'A' && value <= 'F':
+		return value - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
+func stripInvisible(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 0xff01 && r <= 0xff5e {
+			return r - 0xfee0
+		}
+		if r == 0x3000 {
+			return ' '
+		}
+		switch {
+		case r == '\u0000',
+			r == '\u00ad',
+			r == '\u034f',
+			r == '\u061c',
+			r == '\u115f',
+			r == '\u1160',
+			r == '\u17b4',
+			r == '\u17b5',
+			r == '\u180e',
+			r == '\u200b',
+			r == '\u200c',
+			r == '\u200d',
+			r == '\u200e',
+			r == '\u200f',
+			r == '\u202a',
+			r == '\u202b',
+			r == '\u202c',
+			r == '\u202d',
+			r == '\u202e',
+			r == '\u2060',
+			r == '\u2061',
+			r == '\u2062',
+			r == '\u2063',
+			r == '\u2064',
+			r == '\u2066',
+			r == '\u2067',
+			r == '\u2068',
+			r == '\u2069',
+			r == '\u206a',
+			r == '\u206b',
+			r == '\u206c',
+			r == '\u206d',
+			r == '\u206e',
+			r == '\u206f',
+			r == '\ufeff':
+			return -1
+		case unicode.IsControl(r):
+			return ' '
+		default:
+			return r
+		}
+	}, value)
 }
 
 func sample(value string, loc []int) string {

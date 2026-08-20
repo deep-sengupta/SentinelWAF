@@ -127,13 +127,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.proxyRequest(w, r, requestID, clientIP, "waf disabled", false, requestBytes(r, nil))
 		return
 	}
-	if s.cfg.IsIPAllowlisted(clientIP) || s.cfg.IsPathAllowlisted(r.URL.Path) {
-		s.proxyRequest(w, r, requestID, clientIP, "allowlist", true, requestBytes(r, nil))
-		return
-	}
-	if det := s.blocklistDetection(clientIP, r); det != nil {
-		s.block(w, r, requestID, clientIP, http.StatusForbidden, *det, true, requestBytes(r, nil))
-		return
+	allowlisted := s.cfg.IsIPAllowlisted(clientIP) || s.cfg.IsPathAllowlisted(r.URL.Path)
+	if !allowlisted {
+		if det := s.blocklistDetection(clientIP, r); det != nil {
+			s.block(w, r, requestID, clientIP, http.StatusForbidden, *det, true, requestBytes(r, nil))
+			return
+		}
 	}
 	if ok, retryAfter := s.limiter.Allow(clientIP); !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
